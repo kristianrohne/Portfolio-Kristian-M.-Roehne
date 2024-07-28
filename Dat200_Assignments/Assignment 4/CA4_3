@@ -1,0 +1,108 @@
+import pandas as pd
+import matplotlib.pyplot as plt
+from scipy.stats import uniform, randint, loguniform
+
+from sklearn.compose import ColumnTransformer
+from sklearn.decomposition import PCA
+
+from sklearn.impute import SimpleImputer
+from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import confusion_matrix, ConfusionMatrixDisplay
+from sklearn.model_selection import train_test_split, RandomizedSearchCV
+
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import StandardScaler, OneHotEncoder, LabelEncoder
+from sklearn.svm import SVC
+from mlxtend.feature_selection import SequentialFeatureSelector as SFS
+
+data= pd.read_csv("train.csv", index_col= 0, encoding= "UTF-8")
+
+# Dropping the 'Unnamed: 0' and 'index' columns as they seem to be identifiers
+data = data.drop(['index'], axis=1)
+
+
+# Replace negative values with zero for specified columns
+columns_to_fix = ['AFP (ng/mL)', 'ALT (U/L)', 'AST (U/L)']
+
+for column in columns_to_fix:
+    data[column] = data[column].apply(lambda x: max(x, 0))
+
+
+# Separating features and target variable
+X = data.drop('Diagnosis', axis=1)
+y = data['Diagnosis']
+
+# Identifying numerical and categorical columns
+numerical_cols = X.select_dtypes(include=['int64', 'float64']).columns
+categorical_cols = X.select_dtypes(include=['object']).columns
+
+# Pipeline for numerical features
+numerical_transformer = Pipeline(steps=[
+    ('imputer', SimpleImputer(strategy='mean')),  # Impute missing values with the mean
+    ('scaler', StandardScaler())  # Normalize numerical features
+])
+
+# Pipeline for categorical features
+categorical_transformer = Pipeline(steps=[
+    ('imputer', SimpleImputer(strategy='most_frequent')),  # Impute missing values with the most frequent value
+    ('onehot', OneHotEncoder(handle_unknown='ignore'))  # One-hot encode categorical features
+])
+
+# Combining transformers into a ColumnTransformer
+preprocessor = ColumnTransformer(transformers=[
+    ('num', numerical_transformer, numerical_cols),
+    ('cat', categorical_transformer, categorical_cols)
+])
+
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+
+
+X_train_preprocessed = preprocessor.fit_transform(X_train)
+X_test_preprocessed = preprocessor.transform(X_test)
+
+# Define classifiers
+svc = SVC(kernel='rbf', random_state=42)
+logreg = LogisticRegression(random_state=42, solver='saga', max_iter=10000)
+
+# SFS with f1_macro scoring
+sfs_svc = SFS(svc, k_features=(5, 20), forward=True, floating=False, scoring='f1_macro', cv=5)
+sfs_logreg = SFS(logreg, k_features=(5, 20), forward=True, floating=False, scoring='f1_macro', cv=5)
+
+sfs_svc.fit(X_train_preprocessed, y_train)
+sfs_logreg.fit(X_train_preprocessed, y_train)
+
+# Transform features according to SFS results
+X_train_svc_selected = sfs_svc.transform(X_train_preprocessed)
+X_test_svc_selected = sfs_svc.transform(X_test_preprocessed)
+X_train_logreg_selected = sfs_logreg.transform(X_train_preprocessed)
+X_test_logreg_selected = sfs_logreg.transform(X_test_preprocessed)
+
+from sklearn.model_selection import RandomizedSearchCV
+from scipy.stats import uniform, loguniform
+
+# Define parameter distributions for the SVM
+svc_param_dist = {
+    'C': uniform(0.1, 10),
+    'gamma': ['scale', 'auto'] + list(uniform(0.1, 1).rvs(size=10))
+}
+
+# Define parameter distributions for Logistic Regression
+logreg_param_dist = {
+    'C': loguniform(1e-4, 1e2),
+    'penalty': ['l1', 'l2']
+}
+
+# Hyperparameter tuning with RandomizedSearchCV focused on f1_macro scoring
+svm_search = RandomizedSearchCV(svc, param_distributions=svc_param_dist, n_iter=50, cv=5, scoring='f1_macro', verbose=1, random_state=42, n_jobs=-1)
+logreg_search = RandomizedSearchCV(logreg, param_distributions=logreg_param_dist, n_iter=50, cv=5, scoring='f1_macro', verbose=1, random_state=42, n_jobs=-1)
+
+svm_search.fit(X_train_svc_selected, y_train)
+logreg_search.fit(X_train_logreg_selected, y_train)
+
+# Evaluate models
+svm_score = svm_search.score(X_test_svc_selected, y_test)
+logreg_score = logreg_search.score(X_test_logreg_selected, y_test)
+
+print('SVM Test-set score:', svm_score)
+print('Logistic Regression Test-set score:', logreg_score)
+
